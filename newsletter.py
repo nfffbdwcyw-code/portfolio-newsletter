@@ -7,6 +7,7 @@ automatisch in EUR umgerechnet. G/V-Berechnung erfolgt immer in EUR.
 
 import os
 import csv
+import json
 import smtplib
 import datetime
 from pathlib import Path
@@ -35,13 +36,20 @@ def load_portfolio() -> list[dict]:
     csv_path = Path(__file__).parent / "portfolio.csv"
     result = []
     with open(csv_path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
+        # Trennzeichen automatisch erkennen (Komma oder Semikolon)
+        sample = f.read(2048)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+        except csv.Error:
+            dialect = csv.excel
+        for row in csv.DictReader(f, dialect=dialect):
             result.append({
                 "name":   row["Name"].strip(),
                 "isin":   row["ISIN"].strip(),
                 "ticker": row["Ticker"].strip(),
-                "basis":  float(row["Basis"]),
-                "stueck": float(row["Stueck"]),
+                "basis":  float(row["Basis"].replace(",", ".")),
+                "stueck": float(row["Stueck"].replace(",", ".")),
             })
     return result
 
@@ -146,37 +154,64 @@ def build_report_data() -> list[dict]:
 
 # ── KI-Kommentar ─────────────────────────────────────────────────────────────
 
-def generate_ai_commentary(report_data: list[dict]) -> str:
-    """Deutschen Marktkommentar via Claude API generieren."""
+def generate_ai_commentary(report_data: list[dict]) -> dict:
+    """Strukturierten deutschen Marktkommentar via Claude API generieren.
+    Gibt ein Dict mit drei Schlüsseln zurück: gesamt, sektoren, einzeltitel."""
+
     lines = []
     for p in report_data:
         if p["ok"]:
             lines.append(
-                f"- {p['name']}: Kurs {p['current_price']:.2f} {p['currency']}, "
+                f"- {p['name']}: Kurs {p['current_eur']:.2f} EUR, "
                 f"Δ Woche {p['week_pct']:+.1f}%, Δ Monat {p['month_pct']:+.1f}%, "
                 f"G/V seit Kauf {p['gv_pct']:+.1f}%"
             )
         else:
-            lines.append(f"- {p['name']}: Kursdaten nicht verfügbar (Ticker prüfen)")
+            lines.append(f"- {p['name']}: Kursdaten nicht verfügbar")
 
-    prompt = f"""Du bist ein sachkundiger Finanzanalyst. Erstelle einen deutschen Wochenkommentar für folgendes Anlageportfolio:
+    portfolio_texte = "\n".join(lines)
 
-{chr(10).join(lines)}
+    prompt = f"""Du bist ein professioneller Finanzanalyst. Erstelle einen strukturierten deutschen Wochenbericht für folgendes Portfolio.
 
-Erstelle bitte:
-1. Einen Gesamtkommentar (3–4 Sätze) zur Portfolioentwicklung der Woche als <p>-Tag.
-2. Für jede Position einen knappen Kommentar (1–2 Sätze) zu aktuellen Markt- oder Branchentrends.
-   Format: <strong>Positionsname</strong>: Kommentar<br>
+TEXTE (Portfoliodaten dieser Woche):
+{portfolio_texte}
 
-Schreibe sachlich und präzise. Keine Anlageempfehlungen."""
+Erstelle den Bericht in genau drei Abschnitten. Antworte NUR mit einem validen JSON-Objekt, kein weiterer Text davor oder danach:
+
+{{
+  "gesamt": "<p>3–4 Sätze: Überblick zur Portfolioentwicklung der vergangenen Woche. Wie hat sich das Gesamtportfolio entwickelt? Welche Trends dominierten?</p>",
+
+  "sektoren": "<p>Analysiere die Informationen unter TEXTE ausführlich. Schreibe detailliert (ca. 150–200 Wörter) zu den Sektoren <strong>Rohstoffe</strong> (Southern Copper, Freeport McMoran, Xetra Gold, VanEck Junior Gold Miners), <strong>Energie</strong> (GE Vernova, Constellation Energy, iShares Global Clean Energy) und <strong>Robotik &amp; Technologie</strong> (iShares Automation &amp; Robotics, L&amp;G Global Robotics, Krane Humanoid, Vertiv Holdings). Nutze einen professionellen, sachlichen Tonfall.</p>",
+
+  "einzeltitel": "<p><strong>Positionsname</strong>: 1–2 Sätze zur aktuellen Markt- oder Branchenentwicklung dieser Position.</p> ... (für jede verfügbare Position ein eigener Absatz)"
+}}
+
+Regeln: Sachlich und präzise. Keine Anlageempfehlungen. HTML innerhalb der JSON-Strings korrekt escapen."""
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     msg = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=2000,
+        max_tokens=3500,
         messages=[{"role": "user", "content": prompt}],
     )
-    return msg.content[0].text
+    raw = msg.content[0].text.strip()
+
+    # JSON-Block aus der Antwort extrahieren (robust gegen Markdown-Wrapper)
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback: gesamte Antwort als Gesamtkommentar
+        return {
+            "gesamt":       f"<p>{raw}</p>",
+            "sektoren":     "<p><em>Sektor-Analyse konnte nicht geladen werden.</em></p>",
+            "einzeltitel":  "<p><em>Einzeltitel-Analyse konnte nicht geladen werden.</em></p>",
+        }
 
 # ── HTML-Aufbau ───────────────────────────────────────────────────────────────
 
@@ -196,7 +231,7 @@ def _eur(v) -> str:
     return f'<span style="color:{color};font-weight:600">{sign}{v:,.0f}&nbsp;€</span>'
 
 
-def build_html(report_data: list[dict], commentary: str) -> str:
+def build_html(report_data: list[dict], commentary: dict) -> str:
     today    = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     date_str = today.strftime("%d. %B %Y")
 
@@ -277,10 +312,28 @@ def build_html(report_data: list[dict], commentary: str) -> str:
     <p style="color:#aaa;font-size:12px;margin-top:12px">* Alle Werte in EUR. USD/GBP-Kurse werden mit tagesaktuellen Wechselkursen umgerechnet. Einkaufspreise (Basis) in EUR.</p>
   </div>
 
-  <!-- AI Commentary -->
-  <div style="margin:0 40px 32px;background:#f0f6fb;border-left:4px solid #2c5364;border-radius:0 10px 10px 0;padding:24px">
-    <h2 style="color:#1a2a3a;font-size:16px;font-weight:700;margin:0 0 14px">🤖 KI-Marktkommentar</h2>
-    <div style="color:#2c3e50;font-size:14px;line-height:1.8">{commentary}</div>
+  <!-- KI-Analyse: Gesamtportfolio -->
+  <div style="margin:0 40px 18px;background:#f0f6fb;border-left:4px solid #2c5364;border-radius:0 10px 10px 0;padding:24px 28px">
+    <h2 style="color:#1a2a3a;font-size:16px;font-weight:700;margin:0 0 12px;text-transform:uppercase;letter-spacing:.5px">
+      📊 Gesamtportfolio
+    </h2>
+    <div style="color:#2c3e50;font-size:14px;line-height:1.85">{commentary.get('gesamt','')}</div>
+  </div>
+
+  <!-- KI-Analyse: Sektor-Analyse -->
+  <div style="margin:0 40px 18px;background:#f0f6fb;border-left:4px solid #1a7a5e;border-radius:0 10px 10px 0;padding:24px 28px">
+    <h2 style="color:#1a2a3a;font-size:16px;font-weight:700;margin:0 0 12px;text-transform:uppercase;letter-spacing:.5px">
+      🏭 Sektor-Analyse
+    </h2>
+    <div style="color:#2c3e50;font-size:14px;line-height:1.85">{commentary.get('sektoren','')}</div>
+  </div>
+
+  <!-- KI-Analyse: Einzeltitel -->
+  <div style="margin:0 40px 32px;background:#f0f6fb;border-left:4px solid #7a5e1a;border-radius:0 10px 10px 0;padding:24px 28px">
+    <h2 style="color:#1a2a3a;font-size:16px;font-weight:700;margin:0 0 12px;text-transform:uppercase;letter-spacing:.5px">
+      🔍 Einzeltitel-Analyse
+    </h2>
+    <div style="color:#2c3e50;font-size:14px;line-height:1.85">{commentary.get('einzeltitel','')}</div>
   </div>
 
   <!-- Footer -->
@@ -318,7 +371,8 @@ def main():
     try:
         commentary = generate_ai_commentary(report_data)
     except Exception as e:
-        commentary = f"<p><em>KI-Kommentar konnte nicht generiert werden: {e}</em></p>"
+        err = f"<p><em>KI-Kommentar konnte nicht generiert werden: {e}</em></p>"
+        commentary = {"gesamt": err, "sektoren": "", "einzeltitel": ""}
 
     today   = datetime.datetime.now(ZoneInfo("Europe/Berlin"))
     subject = f"📊 Portfolio-Newsletter – {today.strftime('%d.%m.%Y')}"
