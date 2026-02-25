@@ -6,8 +6,10 @@ automatisch in EUR umgerechnet. G/V-Berechnung erfolgt immer in EUR.
 """
 
 import os
+import csv
 import smtplib
 import datetime
+from pathlib import Path
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
@@ -21,32 +23,29 @@ GMAIL_PASSWORD   = os.environ["GMAIL_APP_PASSWORD"]
 RECIPIENT        = os.environ["RECIPIENT_EMAIL"]
 ANTHROPIC_KEY    = os.environ["ANTHROPIC_API_KEY"]
 
-# ── Portfolio ────────────────────────────────────────────────────────────────
-# ticker:    Yahoo Finance Symbol  |  basis: Einkaufspreis in EUR  |  stueck: Anzahl
-# Ticker-Strategie: bevorzugt EUR-gelistete Börsen (Xetra .DE, Euronext .AS/.PA)
-#   US-Aktien (SCCO, GEV, CEG, FCX, VRT): nur auf US-Börsen in USD → auto-konvertiert
-#   Europäische ETFs mit LSE-Ticker (.L): USD/GBP → auto-konvertiert in EUR
-PORTFOLIO = [
-    # ── US-Aktien (USD, automatisch zu EUR konvertiert) ───────────────────────
-    {"name": "Southern Copper",                  "isin": "US84265V1052", "basis": 156.3477, "stueck": 32,   "ticker": "SCCO"},
-    {"name": "GE Vernova",                       "isin": "US36828A1016", "basis": 581.3684, "stueck": 19,   "ticker": "GEV"},
-    {"name": "Constellation Energy",             "isin": "US21037T1097", "basis": 304.9000, "stueck": 17,   "ticker": "CEG"},
-    {"name": "Freeport McMoran",                 "isin": "US35671D8570", "basis": 52.9200,  "stueck": 96,   "ticker": "FCX"},
-    {"name": "Vertiv Holdings",                  "isin": "US92537N1081", "basis": 212.5000, "stueck": 40,   "ticker": "VRT"},
-    # ── EUR-gelistete ETFs & Assets (Xetra / Euronext) ───────────────────────
-    {"name": "VanEck Morningstar DM Dividend",   "isin": "NL0011683594", "basis": 48.2127,  "stueck": 323,  "ticker": "VDIV.AS"},  # EUR ✓ Amsterdam
-    {"name": "Bitcoin",                          "isin": "EU000A2YZK67", "basis": 30000.00, "stueck": 10,   "ticker": "BTC-EUR"},   # EUR ✓ direkt
-    {"name": "iShares Global Clean Energy",      "isin": "IE00B1XNHC34", "basis": 9.0100,   "stueck": 1065, "ticker": "IQQH.DE"},   # EUR ✓ Xetra
-    {"name": "iShares MSCI EM",                  "isin": "IE00B4L5YC18", "basis": 48.9440,  "stueck": 205,  "ticker": "IS3N.DE"},   # EUR ✓ Xetra
-    {"name": "Schneider Electric",               "isin": "FR0000121972", "basis": 259.7500, "stueck": 32,   "ticker": "SU.PA"},     # EUR ✓ Paris
-    {"name": "Prysmian",                         "isin": "IT0004176001", "basis": 97.4000,  "stueck": 85,   "ticker": "PRY.MI"},    # EUR ✓ Milano
-    {"name": "Xetra Gold",                       "isin": "DE000A0S9GB0", "basis": 136.5600, "stueck": 60,   "ticker": "4GLD.DE"},   # EUR ✓ Xetra
-    # ── ETFs mit LSE-Ticker (USD/GBP, auto-konvertiert zu EUR) ────────────────
-    {"name": "iShares Automation & Robotics",    "isin": "IE00BYZK4552", "basis": 13.9970,  "stueck": 1600, "ticker": "RBOT.L"},    # LSE → auto EUR
-    {"name": "L&G Global Robotics",              "isin": "IE00BMW3QX54", "basis": 25.6500,  "stueck": 689,  "ticker": "ROBG.L"},    # LSE → auto EUR
-    {"name": "VanEck Junior Gold Miners",        "isin": "IE00BQQP9G91", "basis": 102.6400, "stueck": 49,   "ticker": "GDXJ"},      # NYSE USD → auto EUR
-    {"name": "Krane Humanoid & Embodied Intell.","isin": "IE000O6Z73N7", "basis": 24.3700,  "stueck": 400,  "ticker": "KBOD.L"},    # sehr neu – ggf. N/A
-]
+# ── Portfolio aus CSV laden ───────────────────────────────────────────────────
+# Datei portfolio.csv liegt im selben Ordner wie dieses Skript.
+# Spalten: Name, ISIN, Ticker, Basis (in EUR), Stueck
+# Ticker-Strategie:
+#   • US-Aktien: kurzes NYSE/NASDAQ-Symbol (USD, wird auto zu EUR konvertiert)
+#   • Europäische ETFs: ISIN.SG (Börse Stuttgart, EUR) – vermeidet GBp-Fehler von LSE
+#   • Direkt EUR-gelistet: VDIV.AS, IQQH.DE, IS3N.DE, SU.PA, PRY.MI, 4GLD.DE, BTC-EUR
+
+def load_portfolio() -> list[dict]:
+    csv_path = Path(__file__).parent / "portfolio.csv"
+    result = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            result.append({
+                "name":   row["Name"].strip(),
+                "isin":   row["ISIN"].strip(),
+                "ticker": row["Ticker"].strip(),
+                "basis":  float(row["Basis"]),
+                "stueck": float(row["Stueck"]),
+            })
+    return result
+
+PORTFOLIO = load_portfolio()
 
 # ── Marktdaten ───────────────────────────────────────────────────────────────
 
@@ -77,6 +76,13 @@ def get_price_data(ticker: str) -> dict | None:
             currency = yf.Ticker(ticker).fast_info.get("currency", "USD")
         except Exception:
             currency = "USD"
+
+        # GBp (Pence) → GBP: LSE-Kurse kommen manchmal als Pence (100x zu hoch)
+        if currency == "GBp":
+            current   /= 100
+            week_ago  /= 100
+            month_ago /= 100
+            currency   = "GBP"
 
         return {
             "current":     current,
@@ -205,24 +211,14 @@ def build_html(report_data: list[dict], commentary: str) -> str:
 
     rows = []
     for p in report_data:
-        # Kurs-Spalte: immer in EUR anzeigen (konvertiert) + native Währung als Hinweis
-        if p["ok"]:
-            native = f'<span style="color:#aaa;font-size:11px">({p["current_price"]:.2f}&nbsp;{p["currency"]})</span>'
-            kurs   = f'{p["current_eur"]:.2f}&nbsp;€&nbsp;{native}'
-            wert   = f'{p["wert_eur"]:,.0f}&nbsp;€'
-        else:
-            kurs = "N/A"
-            wert = "N/A"
+        kurs = f'{p["current_eur"]:.2f}&nbsp;€' if p["ok"] else "N/A"
         rows.append(f"""
         <tr>
-          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;font-weight:500;white-space:nowrap;font-size:14px">{p['name']}</td>
-          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;color:#444;font-size:14px">{kurs}</td>
-          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_pct(p.get('week_pct'))}</td>
-          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_pct(p.get('month_pct'))}</td>
-          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;color:#555;font-size:14px">{p['basis']:.2f}&nbsp;€</td>
-          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_pct(p.get('gv_pct'))}</td>
-          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_eur(p.get('gv_eur'))}</td>
-          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600;font-size:14px">{wert}</td>
+          <td style="padding:12px 16px;border-bottom:1px solid #f0f0f0;font-weight:500;font-size:14px">{p['name']}</td>
+          <td style="padding:12px 16px;border-bottom:1px solid #f0f0f0;text-align:right;color:#444;font-size:14px">{kurs}</td>
+          <td style="padding:12px 16px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_pct(p.get('month_pct'))}</td>
+          <td style="padding:12px 16px;border-bottom:1px solid #f0f0f0;text-align:right;color:#555;font-size:14px">{p['basis']:.2f}&nbsp;€</td>
+          <td style="padding:12px 16px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_pct(p.get('gv_pct'))}</td>
         </tr>""")
 
     return f"""<!DOCTYPE html>
@@ -268,20 +264,17 @@ def build_html(report_data: list[dict], commentary: str) -> str:
     <table style="width:100%;border-collapse:collapse;font-size:14px">
       <thead>
         <tr style="background:#0f2027">
-          <th style="padding:12px 14px;color:#7eb8d4;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Position</th>
-          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Kurs&nbsp;(EUR)</th>
-          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Δ&nbsp;Woche</th>
-          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Δ&nbsp;Monat</th>
-          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Einkauf&nbsp;€</th>
-          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">G/V&nbsp;%</th>
-          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">G/V&nbsp;€</th>
-          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Wert&nbsp;€</th>
+          <th style="padding:12px 16px;color:#7eb8d4;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Position</th>
+          <th style="padding:12px 16px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Kurs&nbsp;€</th>
+          <th style="padding:12px 16px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Δ&nbsp;Monat</th>
+          <th style="padding:12px 16px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px">Einkauf&nbsp;€</th>
+          <th style="padding:12px 16px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px">G/V&nbsp;%</th>
         </tr>
       </thead>
       <tbody>{"".join(rows)}</tbody>
     </table>
     </div>
-    <p style="color:#aaa;font-size:12px;margin-top:12px">* Kurse und G/V in EUR. USD/GBP-Assets werden mit tagesaktuellen Wechselkursen (Yahoo Finance) umgerechnet. Alle Einkaufspreise (Basis) in EUR.</p>
+    <p style="color:#aaa;font-size:12px;margin-top:12px">* Alle Werte in EUR. USD/GBP-Kurse werden mit tagesaktuellen Wechselkursen umgerechnet. Einkaufspreise (Basis) in EUR.</p>
   </div>
 
   <!-- AI Commentary -->
