@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Portfolio Newsletter – Wöchentlicher Finanzbericht (freitags 17:00 Uhr)"""
+"""Portfolio Newsletter – Wöchentlicher Finanzbericht (freitags 17:00 Uhr)
+Währungslogik: Alle Einkaufspreise (basis) sind in EUR.
+Kurse werden von Yahoo Finance in der jeweiligen Börsenwährung geholt und
+automatisch in EUR umgerechnet. G/V-Berechnung erfolgt immer in EUR.
+"""
 
 import os
 import smtplib
@@ -18,26 +22,30 @@ RECIPIENT        = os.environ["RECIPIENT_EMAIL"]
 ANTHROPIC_KEY    = os.environ["ANTHROPIC_API_KEY"]
 
 # ── Portfolio ────────────────────────────────────────────────────────────────
-# ticker:   Yahoo Finance Symbol (bei Bedarf anpassen)
-# basis:    Einkaufspreis pro Einheit (in der jeweiligen Handelswährung)
-# stueck:   Anzahl gehaltener Einheiten
+# ticker:    Yahoo Finance Symbol  |  basis: Einkaufspreis in EUR  |  stueck: Anzahl
+# Ticker-Strategie: bevorzugt EUR-gelistete Börsen (Xetra .DE, Euronext .AS/.PA)
+#   US-Aktien (SCCO, GEV, CEG, FCX, VRT): nur auf US-Börsen in USD → auto-konvertiert
+#   Europäische ETFs mit LSE-Ticker (.L): USD/GBP → auto-konvertiert in EUR
 PORTFOLIO = [
-    {"name": "Southern Copper",                   "isin": "US84265V1052", "basis": 156.3477, "stueck": 32,   "ticker": "SCCO"},
-    {"name": "VanEck Morningstar DM Dividend",     "isin": "NL0011683594", "basis": 48.2127,  "stueck": 323,  "ticker": "VDIV.AS"},
-    {"name": "Bitcoin",                            "isin": "EU000A2YZK67", "basis": 30000.00, "stueck": 10,   "ticker": "BTC-EUR"},
-    {"name": "iShares Automation & Robotics",      "isin": "IE00BYZK4552", "basis": 13.9970,  "stueck": 1600, "ticker": "RBOT.L"},
-    {"name": "GE Vernova",                         "isin": "US36828A1016", "basis": 581.3684, "stueck": 19,   "ticker": "GEV"},
-    {"name": "L&G Global Robotics",                "isin": "IE00BMW3QX54", "basis": 25.6500,  "stueck": 689,  "ticker": "ROBG.L"},
-    {"name": "Constellation Energy",               "isin": "US21037T1097", "basis": 304.9000, "stueck": 17,   "ticker": "CEG"},
-    {"name": "Krane Humanoid & Embodied Intell.",  "isin": "IE000O6Z73N7", "basis": 24.3700,  "stueck": 400,  "ticker": "KBOD.L"},
-    {"name": "iShares Global Clean Energy",        "isin": "IE00B1XNHC34", "basis": 9.0100,   "stueck": 1065, "ticker": "IQQH.DE"},
-    {"name": "VanEck Junior Gold Miners",          "isin": "IE00BQQP9G91", "basis": 102.6400, "stueck": 49,   "ticker": "GDXJ"},
-    {"name": "iShares MSCI EM",                    "isin": "IE00B4L5YC18", "basis": 48.9440,  "stueck": 205,  "ticker": "IS3N.DE"},
-    {"name": "Schneider Electric",                 "isin": "FR0000121972", "basis": 259.7500, "stueck": 32,   "ticker": "SU.PA"},
-    {"name": "Freeport McMoran",                   "isin": "US35671D8570", "basis": 52.9200,  "stueck": 96,   "ticker": "FCX"},
-    {"name": "Prysmian",                           "isin": "IT0004176001", "basis": 97.4000,  "stueck": 85,   "ticker": "PRY.MI"},
-    {"name": "Vertiv Holdings",                    "isin": "US92537N1081", "basis": 212.5000, "stueck": 40,   "ticker": "VRT"},
-    {"name": "Xetra Gold",                         "isin": "DE000A0S9GB0", "basis": 136.5600, "stueck": 60,   "ticker": "4GLD.DE"},
+    # ── US-Aktien (USD, automatisch zu EUR konvertiert) ───────────────────────
+    {"name": "Southern Copper",                  "isin": "US84265V1052", "basis": 156.3477, "stueck": 32,   "ticker": "SCCO"},
+    {"name": "GE Vernova",                       "isin": "US36828A1016", "basis": 581.3684, "stueck": 19,   "ticker": "GEV"},
+    {"name": "Constellation Energy",             "isin": "US21037T1097", "basis": 304.9000, "stueck": 17,   "ticker": "CEG"},
+    {"name": "Freeport McMoran",                 "isin": "US35671D8570", "basis": 52.9200,  "stueck": 96,   "ticker": "FCX"},
+    {"name": "Vertiv Holdings",                  "isin": "US92537N1081", "basis": 212.5000, "stueck": 40,   "ticker": "VRT"},
+    # ── EUR-gelistete ETFs & Assets (Xetra / Euronext) ───────────────────────
+    {"name": "VanEck Morningstar DM Dividend",   "isin": "NL0011683594", "basis": 48.2127,  "stueck": 323,  "ticker": "VDIV.AS"},  # EUR ✓ Amsterdam
+    {"name": "Bitcoin",                          "isin": "EU000A2YZK67", "basis": 30000.00, "stueck": 10,   "ticker": "BTC-EUR"},   # EUR ✓ direkt
+    {"name": "iShares Global Clean Energy",      "isin": "IE00B1XNHC34", "basis": 9.0100,   "stueck": 1065, "ticker": "IQQH.DE"},   # EUR ✓ Xetra
+    {"name": "iShares MSCI EM",                  "isin": "IE00B4L5YC18", "basis": 48.9440,  "stueck": 205,  "ticker": "IS3N.DE"},   # EUR ✓ Xetra
+    {"name": "Schneider Electric",               "isin": "FR0000121972", "basis": 259.7500, "stueck": 32,   "ticker": "SU.PA"},     # EUR ✓ Paris
+    {"name": "Prysmian",                         "isin": "IT0004176001", "basis": 97.4000,  "stueck": 85,   "ticker": "PRY.MI"},    # EUR ✓ Milano
+    {"name": "Xetra Gold",                       "isin": "DE000A0S9GB0", "basis": 136.5600, "stueck": 60,   "ticker": "4GLD.DE"},   # EUR ✓ Xetra
+    # ── ETFs mit LSE-Ticker (USD/GBP, auto-konvertiert zu EUR) ────────────────
+    {"name": "iShares Automation & Robotics",    "isin": "IE00BYZK4552", "basis": 13.9970,  "stueck": 1600, "ticker": "RBOT.L"},    # LSE → auto EUR
+    {"name": "L&G Global Robotics",              "isin": "IE00BMW3QX54", "basis": 25.6500,  "stueck": 689,  "ticker": "ROBG.L"},    # LSE → auto EUR
+    {"name": "VanEck Junior Gold Miners",        "isin": "IE00BQQP9G91", "basis": 102.6400, "stueck": 49,   "ticker": "GDXJ"},      # NYSE USD → auto EUR
+    {"name": "Krane Humanoid & Embodied Intell.","isin": "IE000O6Z73N7", "basis": 24.3700,  "stueck": 400,  "ticker": "KBOD.L"},    # sehr neu – ggf. N/A
 ]
 
 # ── Marktdaten ───────────────────────────────────────────────────────────────
@@ -95,17 +103,17 @@ def build_report_data() -> list[dict]:
         data  = get_price_data(pos["ticker"])
 
         if data:
-            cur    = data["current"]
-            curr   = data["currency"]
-            rate   = fx(curr)
-            cur_eur = cur * rate
+            cur     = data["current"]
+            curr    = data["currency"]
+            rate    = fx(curr)
+            cur_eur = cur * rate          # aktueller Kurs in EUR
 
-            # G/V-Berechnung: % basiert auf nativem Kurs vs. Einkaufsbasis
-            gv_pct   = (cur - pos["basis"]) / pos["basis"] * 100
-            # EUR-Werte (Näherung: Einkaufsbasis in gleicher Währung angenommen)
-            wert_eur = cur_eur * pos["stueck"]
-            basis_eur = pos["basis"] * rate * pos["stueck"]
-            gv_eur   = wert_eur - basis_eur
+            # G/V-Berechnung: ALLES in EUR (basis ist bereits in EUR!)
+            # Bug-Fix: gv_pct darf nicht nativen Kurs (USD/GBP) mit EUR-Basis vergleichen
+            gv_pct    = (cur_eur - pos["basis"]) / pos["basis"] * 100
+            wert_eur  = cur_eur * pos["stueck"]
+            basis_eur = pos["basis"] * pos["stueck"]   # basis bereits in EUR – kein FX nötig!
+            gv_eur    = wert_eur - basis_eur
 
             entry.update({
                 "current_price": cur,
@@ -187,9 +195,9 @@ def build_html(report_data: list[dict], commentary: str) -> str:
     date_str = today.strftime("%d. %B %Y")
 
     ok_positions = [p for p in report_data if p["ok"]]
-    total_wert   = sum(p["wert_eur"]                       for p in ok_positions)
-    total_basis  = sum(p["basis"] * p["stueck"] *
-                       get_fx_to_eur(p.get("currency", "EUR")) for p in ok_positions)
+    total_wert   = sum(p["wert_eur"]            for p in ok_positions)
+    # basis ist bereits in EUR – kein FX-Faktor anwenden (Bug-Fix)
+    total_basis  = sum(p["basis"] * p["stueck"] for p in ok_positions)
     total_gv     = total_wert - total_basis
     total_gv_pct = (total_gv / total_basis * 100) if total_basis else 0
     gv_color     = "#27ae60" if total_gv >= 0 else "#e74c3c"
@@ -197,18 +205,24 @@ def build_html(report_data: list[dict], commentary: str) -> str:
 
     rows = []
     for p in report_data:
-        kurs  = f"{p['current_price']:.2f}&nbsp;{p['currency']}" if p["ok"] else "N/A"
-        wert  = f"{p['wert_eur']:,.0f}&nbsp;€"                   if p["ok"] else "N/A"
+        # Kurs-Spalte: immer in EUR anzeigen (konvertiert) + native Währung als Hinweis
+        if p["ok"]:
+            native = f'<span style="color:#aaa;font-size:11px">({p["current_price"]:.2f}&nbsp;{p["currency"]})</span>'
+            kurs   = f'{p["current_eur"]:.2f}&nbsp;€&nbsp;{native}'
+            wert   = f'{p["wert_eur"]:,.0f}&nbsp;€'
+        else:
+            kurs = "N/A"
+            wert = "N/A"
         rows.append(f"""
         <tr>
-          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;font-weight:500;white-space:nowrap">{p['name']}</td>
-          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;text-align:right;color:#555">{kurs}</td>
-          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;text-align:right">{_pct(p.get('week_pct'))}</td>
-          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;text-align:right">{_pct(p.get('month_pct'))}</td>
-          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;text-align:right;color:#555">{p['basis']:.2f}</td>
-          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;text-align:right">{_pct(p.get('gv_pct'))}</td>
-          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;text-align:right">{_eur(p.get('gv_eur'))}</td>
-          <td style="padding:9px 12px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">{wert}</td>
+          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;font-weight:500;white-space:nowrap;font-size:14px">{p['name']}</td>
+          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;color:#444;font-size:14px">{kurs}</td>
+          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_pct(p.get('week_pct'))}</td>
+          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_pct(p.get('month_pct'))}</td>
+          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;color:#555;font-size:14px">{p['basis']:.2f}&nbsp;€</td>
+          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_pct(p.get('gv_pct'))}</td>
+          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-size:14px">{_eur(p.get('gv_eur'))}</td>
+          <td style="padding:11px 14px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600;font-size:14px">{wert}</td>
         </tr>""")
 
     return f"""<!DOCTYPE html>
@@ -251,29 +265,29 @@ def build_html(report_data: list[dict], commentary: str) -> str:
   <div style="padding:10px 40px 30px">
     <h2 style="color:#1a2a3a;font-size:15px;font-weight:700;margin:20px 0 14px;padding-top:10px">Einzelpositionen</h2>
     <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <table style="width:100%;border-collapse:collapse;font-size:14px">
       <thead>
         <tr style="background:#0f2027">
-          <th style="padding:10px 12px;color:#7eb8d4;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Position</th>
-          <th style="padding:10px 12px;color:#7eb8d4;text-align:right;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Kurs</th>
-          <th style="padding:10px 12px;color:#7eb8d4;text-align:right;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Δ&nbsp;Woche</th>
-          <th style="padding:10px 12px;color:#7eb8d4;text-align:right;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Δ&nbsp;Monat</th>
-          <th style="padding:10px 12px;color:#7eb8d4;text-align:right;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Einkauf</th>
-          <th style="padding:10px 12px;color:#7eb8d4;text-align:right;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">G/V&nbsp;%</th>
-          <th style="padding:10px 12px;color:#7eb8d4;text-align:right;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">G/V&nbsp;€</th>
-          <th style="padding:10px 12px;color:#7eb8d4;text-align:right;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Wert&nbsp;€</th>
+          <th style="padding:12px 14px;color:#7eb8d4;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Position</th>
+          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Kurs&nbsp;(EUR)</th>
+          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Δ&nbsp;Woche</th>
+          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Δ&nbsp;Monat</th>
+          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Einkauf&nbsp;€</th>
+          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">G/V&nbsp;%</th>
+          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">G/V&nbsp;€</th>
+          <th style="padding:12px 14px;color:#7eb8d4;text-align:right;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">Wert&nbsp;€</th>
         </tr>
       </thead>
       <tbody>{"".join(rows)}</tbody>
     </table>
     </div>
-    <p style="color:#aaa;font-size:11px;margin-top:10px">* EUR-Werte werden mit tagesaktuellen Wechselkursen umgerechnet. G/V basiert auf der eingetragenen Einkaufsbasis.</p>
+    <p style="color:#aaa;font-size:12px;margin-top:12px">* Kurse und G/V in EUR. USD/GBP-Assets werden mit tagesaktuellen Wechselkursen (Yahoo Finance) umgerechnet. Alle Einkaufspreise (Basis) in EUR.</p>
   </div>
 
   <!-- AI Commentary -->
   <div style="margin:0 40px 32px;background:#f0f6fb;border-left:4px solid #2c5364;border-radius:0 10px 10px 0;padding:24px">
-    <h2 style="color:#1a2a3a;font-size:15px;font-weight:700;margin:0 0 14px">🤖 KI-Marktkommentar</h2>
-    <div style="color:#2c3e50;font-size:13px;line-height:1.75">{commentary}</div>
+    <h2 style="color:#1a2a3a;font-size:16px;font-weight:700;margin:0 0 14px">🤖 KI-Marktkommentar</h2>
+    <div style="color:#2c3e50;font-size:14px;line-height:1.8">{commentary}</div>
   </div>
 
   <!-- Footer -->
